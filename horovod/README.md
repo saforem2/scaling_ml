@@ -58,7 +58,7 @@
 
 ## [Horovod Data Parallel Frameworks][3]
 
-![Horovod](../assets/horovod.png)
+![Horovod](../images/horovod.png)
 
 [1]: https://github.com/horovod/horovod
 [2]: https://venturebeat.com/2021/01/12/google-trained-a-trillion-parameter-ai-language-model/
