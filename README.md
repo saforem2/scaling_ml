@@ -31,4 +31,4 @@ This section of the workshop will introduce you to the methods we use to run dis
 
 ### Simple Scaling Comparison
 
-![./images/pytorch_scaling.png](./images/pytorch_scaling.png)
+![./images/pytorch_scaling.png](./images/scaling_transparent.png)
