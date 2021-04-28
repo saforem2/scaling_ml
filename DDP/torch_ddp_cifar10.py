@@ -29,6 +29,7 @@ modulepath = os.path.dirname(here)
 if modulepath not in sys.path:
     sys.path.append(modulepath)
 
+import utils.io as io
 from utils.io import Logger, DistributedDataObject, prepare_datasets
 from utils.parse_args import parse_args_ddp
 
@@ -89,13 +90,14 @@ def evaluate(model, device, test_loader):
     return accuracy
 
 
-def metric_average(x: torch.tensor, with_ddp: bool) -> (torch.tensor):
+def metric_average(x: torch.Tensor) -> (torch.Tensor):
     """Compute global averages across all workers if using DDP. """
     x = torch.tensor(x)
-    if with_ddp:
+    #  if with_ddp:
+    if dist.is_initialized():
         # Sum everything and divide by total size
         dist.all_reduce(x, op=dist.ReduceOp.SUM)
-        #  x /= SIZE
+        x /= dist.get_world_size()
     else:
         pass
 
@@ -108,7 +110,7 @@ def train(
         device: torch.device,
         rank: int,
         model: nn.Module,
-        loss_fn: Callable[[torch.tensor], torch.tensor],
+        loss_fn: Callable[[torch.Tensor], torch.Tensor],
         optimizer: optim.Optimizer,
         args: dict,
         scaler: GradScaler=None,
@@ -116,14 +118,17 @@ def train(
     model.train()
     # Horovod: set epoch to sampler for shuffling
     data.sampler.set_epoch(epoch)
-    running_loss = 0.0
-    training_acc = 0.0
-    #  running_loss = torch.tensor(0.0)
-    #  training_acc = torch.tensor(0.0)
+    running_loss = torch.tensor(0.0)
+    training_acc = torch.tensor(0.0)
+    if torch.cuda.is_available():
+        running_loss = running_loss.to(device)
+        training_acc = training_acc.to(device)
+    #  running_loss = 0.0
+    #  training_acc = 0.0
 
     for batch_idx, (batch, target) in enumerate(data.loader):
-        #  if args.cuda:
-        batch, target = batch.to(device), target.to(device)
+        if torch.cuda.is_available():
+            batch, target = batch.to(device), target.to(device)
 
         optimizer.zero_grad()
         output = model(batch)
@@ -155,57 +160,42 @@ def train(
             jdx = batch_idx * len(batch)
             frac = 100. * batch_idx / len(data.loader)
             pre = [f'[{rank}]',
-                   f'[{jdx}/{len(data.sampler)} ({frac}%)]']
-                   #  f'[{jdx:05}/{len(data.sampler):05} ({frac:>4.3g}%)]']
-            mstr = ' '.join([
-                #  f'{str(k):>5}: {v:<7.4g}' for k, v in metrics_.items()
-                f'{k}: {v}' for k, v in metrics_.items()
-            ])
-            logger.log(' '.join([*pre, mstr]))
+                   f'[{jdx:>5}/{len(data.sampler):<5} ({frac:>03.1f}%)]']
+            io.print_metrics(metrics_, pre=pre, logger=logger)
 
-            #  str0 = f'[{jdx:5<}/{len(data.sampler):5<} ({frac:>3.3g}%)]'
-            #  str1 = ' '.join([
-            #      f'{str(k):>5}: {v:<7.4g}' for k, v in metrics_.items()
-            #  ])
-            #  logger.log(' '.join([str0, str1]))
 
     running_loss = running_loss / len(data.sampler)
     training_acc = training_acc / len(data.sampler)
-    #  loss_avg = metric_average(running_loss, args.cuda)
-    #  training_acc = metric_average(training_acc, args.cuda)
+    loss_avg = metric_average(running_loss)
+    training_acc = metric_average(training_acc)
     if rank == 0:
-        logger.log(f'training set; avg loss: {running_loss:.4g}, '
+        logger.log(f'training set; avg loss: {loss_avg:.4g}, '
                    f'accuracy: {training_acc * 100:.2f}%')
 
 
-def demo_basic(rank, world_size):
-    print(f'Running basic DDP example on rank: {rank}')
-    setup(rank, world_size)
-    model = torchvision.models.resnet18(pretrained=False)
-    ddp_model = DDP(model, device_ids=[rank])
-    loss_fn = nn.MSELoss()
-    optimizer = optim.sgd(ddp_model.parameters(), lr=0.001)
-    optimizer.zero_grad()
-
 def main():
     args = parse_args_ddp()
-    setup(args.local_rank)
-    #  setup(args.local_rank, os.en
     with_cuda = torch.cuda.is_available()
+
+    backend = 'nccl' if with_cuda else 'gloo'
+    dist.init_process_group(backend=backend)
+    #  setup(args.local_rank)
+    #  setup(args.local_rank, os.en
 
     args.cuda = with_cuda
 
     local_rank = args.local_rank
-    epochs = args.epochs
-    batch_size = args.batch_size
-    lr = args.lr
-    random_seed = args.random_seed
-    model_dir = args.model_dir
-    model_filename = args.model_filename
+    #  epochs = args.epochs
+    #  batch_size = args.batch_size
+    #  lr = args.lr
+    #  random_seed = args.random_seed
+    #  model_dir = args.model_dir
+    #  model_filename = args.model_filename
     resume = args.resume
 
     world_size = 1 if not dist.is_available() else dist.get_world_size()
-    setup(local_rank, world_size, backend=args.backend)
+    backend = 'nccl' if with_cuda else 'gloo'
+    #  setup(local_rank, world_size, backend=args.backend)
 
     # Create directories outside the PyTorch program
     # Do not create directory here because it is not multiprocess safe
@@ -214,10 +204,10 @@ def main():
         os.makedirs(model_dir)
     '''
 
-    model_filepath = os.path.join(model_dir, model_filename)
+    model_filepath = os.path.join(args.model_dir, args.model_filename)
 
     # We need to use seeds to make sure that the models initialized in different processes are the same
-    set_random_seeds(random_seed=random_seed)
+    set_random_seeds(random_seed=args.random_seed)
 
     # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
     #  backend = 'nccl' if with_cuda else 'gloo'
@@ -230,7 +220,7 @@ def main():
 
     if with_cuda:
         if world_size > 1:
-            device = torch.device(f'cuda:{local_rank}')
+            device = torch.device(f'cuda:{args.local_rank}')
         else:
             device = torch.device('cuda')
         model = model.to(device)
@@ -238,25 +228,17 @@ def main():
     else:
         device = torch.device('cpu')
 
-    #  device = torch.device(f'cuda:{local_rank}' if with_cuda and
-                          #  else f'cpu:{local_rank}')
-    #  if args.cuda:
-    #      device = torch.device("cuda:{}".format(local_rank))
-    #      world_size = torch.cuda.device_count()
-    #  else:
-    #      #  device = torch.device(f'cpu:{local_rank}')
-    #      device = torch.device(int(local_rank))
-
-    #  ddp_model = DDP(model, device_ids=[local_rank], output_device=local_rank)
-    ddp_model = DDP(model)
+    ddp_model = DDP(model,
+                    device_ids=[args.local_rank],
+                    output_device=args.local_rank)
 
     # We only save the model who uses device "cuda:0"
     # To resume, the device for the saved model would also be "cuda:0"
     if resume == True:
         if with_cuda:
             map_location = {"cuda:0": "cuda:{}".format(local_rank)}
-        else:
-            map_location = {'0': f'{local_rank}'}
+        #  else:
+        #      map_location = {'0': f'{local_rank}'}
 
         state_dict = torch.load(model_filepath, map_location=map_location)
         ddp_model.load_state_dict(state_dict)
@@ -266,13 +248,14 @@ def main():
                             num_workers=world_size,
                             data='cifar10')
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(ddp_model.parameters(), lr=lr, weight_decay=1e-5)
+    optimizer = optim.Adam(ddp_model.parameters(),
+                           lr=args.lr, weight_decay=1e-5)
     #  optimizer = optim.SGD(ddp_model.parameters(), lr=lr, momentum=0.9,
     #                        weight_decay=1e-5)
 
     # Loop over the dataset multiple times
     epoch_times = []
-    for epoch in range(epochs):
+    for epoch in range(args.epochs):
         t0 = time.time()
         train(epoch, data['training'], device=device, rank=local_rank,
               model=ddp_model, loss_fn=criterion,
