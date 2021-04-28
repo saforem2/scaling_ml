@@ -5,6 +5,8 @@ Modified from original: https://leimao.github.io/blog/PyTorch-Distributed-Traini
 """
 import sys
 import torch
+import time
+import json
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
 import torch.nn as nn
@@ -12,6 +14,7 @@ import torch.distributed as dist
 from typing import Callable
 from torch.cuda.amp.autocast_mode import autocast
 from torch.cuda.amp.grad_scaler import GradScaler
+from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.optim as optim
 
 import torchvision
@@ -188,7 +191,7 @@ def main(*args):
         device = torch.device(int(local_rank))
 
     model = model.to(device)
-    ddp_model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
+    ddp_model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     # We only save the model who uses device "cuda:0"
     # To resume, the device for the saved model would also be "cuda:0"
@@ -198,43 +201,28 @@ def main(*args):
         else:
             map_location = {'0': f'{local_rank}'}
 
-        ddp_model.load_state_dict(torch.load(model_filepath, map_location=map_location))
+        state_dict = torch.load(model_filepath, map_location=map_location)
+        ddp_model.load_state_dict(state_dict)
 
     # Prepare dataset and dataloader
-    transform = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-    ])
-
-    # Data should be prefetched
-    # Download should be set to be False, because it is not multiprocess safe
-    #  train_set = torchvision.datasets.CIFAR10(root="data", train=True,
-    #                                           download=True, transform=transform)
-    #  test_set = torchvision.datasets.CIFAR10(root="data", train=False,
-    #                                          download=True, transform=transform)
     data = prepare_datasets(args, rank=local_rank,
                             num_workers=num_workers,
                             data='cifar10')
-
-    # Restricts data loading to a subset of the dataset exclusive to the current process
-    #  train_sampler = DistributedSampler(dataset=train_set)
-
-    #  train_loader = DataLoader(dataset=train_set, batch_size=batch_size, sampler=train_sampler, num_workers=8)
-    #  # Test loader does not have to follow distributed sampling strategy
-    #  test_loader = DataLoader(dataset=test_set, batch_size=128, shuffle=False, num_workers=8)
-
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(ddp_model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-5)
+    optimizer = optim.Adam(ddp_model.parameters(), lr=lr, weight_decay=1e-5)
+    #  optimizer = optim.SGD(ddp_model.parameters(), lr=lr, momentum=0.9,
+    #                        weight_decay=1e-5)
 
     # Loop over the dataset multiple times
+    epoch_times = []
     for epoch in range(epochs):
-        #  logger.log("Local Rank: {}, Epoch: {}, Training ...".format(local_rank, epoch))
-        # Save and evaluate model routinely
+        t0 = time.time()
         train(epoch, data['training'], device=device, rank=local_rank,
               model=ddp_model, loss_fn=criterion,
               optimizer=optimizer, args=args, scaler=None)
+
+        if epoch > 2:
+            epoch_times.append(time.time() - t0)
 
         if epoch % 10 == 0:
             if local_rank == 0:
@@ -244,23 +232,32 @@ def main(*args):
                 logger.log('-' * 75)
                 logger.log(f'Epoch: {epoch}, Accuracy: {accuracy}')
                 logger.log('-' * 75)
-        #  if epoch % 10 == 0:
-        #      if local_rank == 0:
-        #          accuracy = evaluate(model=ddp_model, device=device, test_loader=test_loader)
-        #          torch.save(ddp_model.state_dict(), model_filepath)
-        #          logger.log("-" * 75)
-        #          logger.log("Epoch: {}, Accuracy: {}".format(epoch, accuracy))
-        #          logger.log("-" * 75)
+
+
+    if local_rank == 0:
+        epoch_times_str = ', '.join(str(x) for x in epoch_times)
+        logger.log('Epoch times:')
+        logger.log(epoch_times_str)
+
+        args_file = os.path.join(os.getcwd(), f'args_size{num_workers}.json')
+        logger.log(f'Saving args to: {args_file}.')
+
+        with open(args_file, 'at') as f:
+            json.dump(args.__dict__, f, indent=4)
+
+        times_file = os.path.join(os.getcwd(),
+                                  f'epoch_times_size{num_workers}.csv')
+        logger.log(f'Saving epoch times to: {times_file}')
+        with open(times_file, 'a') as f:
+            f.write(epoch_times_str + '\n')
+
+        #  with open('./args.json', 'wt') as f:
+        #      json.dump(args.__dict__, f, indent=4)
         #
-        #  ddp_model.train()
-        #
-        #  for data in train_loader:
-        #      inputs, labels = data[0].to(device), data[1].to(device)
-        #      optimizer.zero_grad()
-        #      outputs = ddp_model(inputs)
-        #      loss = criterion(outputs, labels)
-        #      loss.backward()
-        #      optimizer.step()
+        #  with open('./epoch_times.csv', 'w') as f:
+        #      f.write(', '.join(str(x) for x in epoch_times) + '\n')
+
+
 
 
 if __name__ == "__main__":
