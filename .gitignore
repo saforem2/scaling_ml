@@ -1,3 +1,10 @@
+cifar-10-batches-py
+horovod/sdl_workshop/
+lightning_logs/
+*old*
+datasets
+data
+*.pth
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
