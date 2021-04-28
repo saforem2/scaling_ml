@@ -29,6 +29,7 @@ modulepath = os.path.dirname(here)
 if modulepath not in sys.path:
     sys.path.append(modulepath)
 
+import utils.io as io
 from utils.io import Logger, DistributedDataObject, prepare_datasets
 from utils.parse_args import parse_args_ddp
 
@@ -40,36 +41,6 @@ def set_random_seeds(random_seed=0):
     torch.backends.cudnn.benchmark = False
     np.random.seed(random_seed)
     random.seed(random_seed)
-
-
-def cleanup():
-    dist.destroy_process_group()
-
-
-def get_backend():
-    if dist.is_nccl_available():
-        return 'nccl'
-    if dist.is_mpi_available():
-        return 'mpi'
-    if dist.is_gloo_available():
-        return 'gloo'
-
-    raise ValueError('No backend found.')
-
-
-def setup(
-        rank: str = '0',
-        master_addr: str = 'localhost',
-        master_port: str = '4921',
-        backend: str = 'gloo'
-):
-    os.environ['MASTER_ADDR'] = str(master_addr)
-    os.environ['MASTER_PORT'] = str(master_port) # can be anything
-    os.environ['RANK'] = str(rank)
-    # initialize the process group
-    #  dist.init_process_group(backend, rank=rank, world_size=world_size)
-    #  dist.init_process_group(backend, rank=rank, world_size=world_size)
-    dist.init_process_group(backend=backend, init_method='env://')
 
 
 def evaluate(model, device, test_loader):
@@ -95,7 +66,7 @@ def metric_average(x: torch.tensor, with_ddp: bool) -> (torch.tensor):
     if with_ddp:
         # Sum everything and divide by total size
         dist.all_reduce(x, op=dist.ReduceOp.SUM)
-        #  x /= SIZE
+        x /= SIZE
     else:
         pass
 
@@ -122,8 +93,8 @@ def train(
     #  training_acc = torch.tensor(0.0)
 
     for batch_idx, (batch, target) in enumerate(data.loader):
-        #  if args.cuda:
-        batch, target = batch.to(device), target.to(device)
+        if args.cuda:
+            batch, target = batch.to(device), target.to(device)
 
         optimizer.zero_grad()
         output = model(batch)
@@ -145,7 +116,7 @@ def train(
 
         if batch_idx % args.log_interval == 0:
             metrics_ = {
-                'epoch': epoch,
+                'remaining': epoch/args.epochs,
                 'batch_loss': loss.item() / args.batch_size,
                 'running_loss': running_loss / len(data.sampler),
                 'batch_acc': acc.item() / args.batch_size,
@@ -155,13 +126,31 @@ def train(
             jdx = batch_idx * len(batch)
             frac = 100. * batch_idx / len(data.loader)
             pre = [f'[{rank}]',
-                   f'[{jdx}/{len(data.sampler)} ({frac}%)]']
+                   f'[{jdx:>5}/{len(data.sampler):<5} ({frac:>04.2g}%)]']
+            io.print_metrics(metrics_, pre=pre, logger=logger)
+
+
+            #  pre = f'{rstr} [{estr} {bstr} {fstr}]'
+            #  pre = [f'[{rank}]',
+            #         f'[epoch: {epoch} / {args.epochs} batch: {jdx}/{len(data.sampler)} ({frac:05g}%)]']
+
+            #  mstr = ' '.join([
+            #      f'{str(k):<5}: {v:<7.4g}' if isinstance(v, (float, torch.Tensor))
+            #      else f'{str(k):<5}: {v:<7g}' for k, v in metrics_.items()
+            #  ])
+            #  logger.log(f'{rstr} [{estr} {fstr}]  {mstr}')
+            #  logger.log(' '.join([rstr, f'[{estr} {fstr}]', mstr]))
+            #  logger.log(pre)
+            #  logger.log(' '.join([*pre, mstr]))
+            #  io.print_metrics(metrics_, pre=pre, logger=logger)
+
                    #  f'[{jdx:05}/{len(data.sampler):05} ({frac:>4.3g}%)]']
-            mstr = ' '.join([
                 #  f'{str(k):>5}: {v:<7.4g}' for k, v in metrics_.items()
-                f'{k}: {v}' for k, v in metrics_.items()
-            ])
-            logger.log(' '.join([*pre, mstr]))
+            #  mstr = ' '.join([
+            #      f'{k:<8}: {v:<6.5g}' if isinstance(v, (float, torch.Tensor))
+            #      else f'{k}: {v:6}' for k, v in metrics_.items()
+            #  ])
+            #  logger.log(' '.join([*pre, mstr]))
 
             #  str0 = f'[{jdx:5<}/{len(data.sampler):5<} ({frac:>3.3g}%)]'
             #  str1 = ' '.join([
@@ -178,19 +167,8 @@ def train(
                    f'accuracy: {training_acc * 100:.2f}%')
 
 
-def demo_basic(rank, world_size):
-    print(f'Running basic DDP example on rank: {rank}')
-    setup(rank, world_size)
-    model = torchvision.models.resnet18(pretrained=False)
-    ddp_model = DDP(model, device_ids=[rank])
-    loss_fn = nn.MSELoss()
-    optimizer = optim.sgd(ddp_model.parameters(), lr=0.001)
-    optimizer.zero_grad()
-
-def main():
+def main(*args):
     args = parse_args_ddp()
-    setup(args.local_rank)
-    #  setup(args.local_rank, os.en
     with_cuda = torch.cuda.is_available()
 
     args.cuda = with_cuda
@@ -204,9 +182,6 @@ def main():
     model_filename = args.model_filename
     resume = args.resume
 
-    world_size = 1 if not dist.is_available() else dist.get_world_size()
-    setup(local_rank, world_size, backend=args.backend)
-
     # Create directories outside the PyTorch program
     # Do not create directory here because it is not multiprocess safe
     '''
@@ -217,38 +192,46 @@ def main():
     model_filepath = os.path.join(model_dir, model_filename)
 
     # We need to use seeds to make sure that the models initialized in different processes are the same
+    #  torch.manual_seed(args.seed)
+    #  if with_cuda:
+    #      torch.cuda.manual_seed(args.seed)
+
+    if args.num_threads != 0:
+        torch.set_num_threads(args.num_threads)
+
     set_random_seeds(random_seed=random_seed)
 
     # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
-    #  backend = 'nccl' if with_cuda else 'gloo'
-    #  dist.init_process_group(backend=backend)
+    backend = 'nccl' if with_cuda else 'gloo'
+    dist.init_process_group(backend=backend, init_method='env://')
     #  torch.distributed.init_process_group(backend=backend)
     # torch.distributed.init_process_group(backend="gloo")
 
     # Encapsulate the model on the GPU assigned to the current process
     model = torchvision.models.resnet18(pretrained=False)
-
     if with_cuda:
-        if world_size > 1:
-            device = torch.device(f'cuda:{local_rank}')
-        else:
-            device = torch.device('cuda')
-        model = model.to(device)
-
+        device = torch.device(f'cuda{args.local_rank}')
+        model.to(device)
     else:
-        device = torch.device('cpu')
+        device = torch.device(args.local_rank)
 
-    #  device = torch.device(f'cuda:{local_rank}' if with_cuda and
-                          #  else f'cpu:{local_rank}')
+    #      model.to(f'cuda:{args.local_rank}')
+    #  else:
+    #      model.to(str(args.local_rank))
+    #      #  model.cuda()
+
+    num_workers = 1 if not dist.is_available() else dist.get_world_size()
+
     #  if args.cuda:
     #      device = torch.device("cuda:{}".format(local_rank))
-    #      world_size = torch.cuda.device_count()
+    #      #  num_workers = dist.get_world_size()
+    #      #  num_workers = torch.cuda.device_count()
     #  else:
-    #      #  device = torch.device(f'cpu:{local_rank}')
-    #      device = torch.device(int(local_rank))
+    #      device = torch.device('cpu')
 
-    #  ddp_model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    #  model = model.to(device)
     ddp_model = DDP(model)
+    #  ddp_model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     # We only save the model who uses device "cuda:0"
     # To resume, the device for the saved model would also be "cuda:0"
@@ -263,7 +246,7 @@ def main():
 
     # Prepare dataset and dataloader
     data = prepare_datasets(args, rank=local_rank,
-                            num_workers=world_size,
+                            num_workers=num_workers,
                             data='cifar10')
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(ddp_model.parameters(), lr=lr, weight_decay=1e-5)
@@ -296,19 +279,27 @@ def main():
         logger.log('Epoch times:')
         logger.log(epoch_times_str)
 
-        args_file = os.path.join(os.getcwd(), f'args_size{world_size}.json')
+        args_file = os.path.join(os.getcwd(), f'args_size{num_workers}.json')
         logger.log(f'Saving args to: {args_file}.')
 
         with open(args_file, 'at') as f:
             json.dump(args.__dict__, f, indent=4)
 
         times_file = os.path.join(os.getcwd(),
-                                  f'epoch_times_size{world_size}.csv')
+                                  f'epoch_times_size{num_workers}.csv')
         logger.log(f'Saving epoch times to: {times_file}')
         with open(times_file, 'a') as f:
             f.write(epoch_times_str + '\n')
+
+        #  with open('./args.json', 'wt') as f:
+        #      json.dump(args.__dict__, f, indent=4)
+        #
+        #  with open('./epoch_times.csv', 'w') as f:
+        #      f.write(', '.join(str(x) for x in epoch_times) + '\n')
+
 
 
 
 if __name__ == "__main__":
     main()
+

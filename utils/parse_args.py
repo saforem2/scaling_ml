@@ -13,8 +13,16 @@ def parse_args_ddp(*args):
     # Each process runs on 1 GPU device specified by the local_rank argument.
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument(
-        "--local_rank", type=int,
+        "--local_rank", type=int, default=0,
         help="Local rank. Necessary for using the torch.distributed.launch utility."
+    )
+    parser.add_argument(
+        '--num_threads', type=int, default=0, required=False,
+        help='set number of threads per worker'
+    )
+    parser.add_argument(
+        '--backend', type=str, default='gloo',
+        help='Backend to use'
     )
     parser.add_argument(
         "--epochs", type=int, default=100,
