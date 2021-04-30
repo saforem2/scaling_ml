@@ -1,8 +1,8 @@
 import os
 import shutil
 import datetime
-import torch
-from torchvision import datasets, transforms
+#  import torch
+#  from torchvision import datasets, transforms
 
 TERM_WIDTH, TERM_HEIGHT = shutil.get_terminal_size(fallback=(156, 50))
 
@@ -34,30 +34,12 @@ class Logger:
         self.console.log(s, *args, **kwargs)
 
 
-class DistributedDataObject:
-    def __init__(
-            self,
-            dataset: torch.utils.data.Dataset,
-            batch_size: int,
-            rank: int,
-            num_workers: int,
-            **kwargs: dict
-    ):
-        self.dataset = dataset
-        self.sampler = torch.utils.data.distributed.DistributedSampler(
-            self.dataset, num_replicas=num_workers, rank=rank
-        )
-        self.loader = torch.utils.data.DataLoader(
-            self.dataset, batch_size, sampler=self.sampler, **kwargs
-        )
-
-
 def print_metrics(metrics: dict, pre: list = None, logger: Logger = None):
     if logger is None:
         logger = Logger()
 
     mstr = ' '.join([
-        f'{str(k):<5}: {v:<7.4g}' if isinstance(v, (float, torch.Tensor))
+        f'{str(k):<5}: {v:<7.4g}' if isinstance(v, (float))
         else f'{str(k):<5}: {v:<7g}' for k, v in metrics.items()
     ])
 
@@ -67,6 +49,7 @@ def print_metrics(metrics: dict, pre: list = None, logger: Logger = None):
         logger.log(mstr)
 
 
+'''
 def prepare_datasets(
         args: dict,
         rank: int,
@@ -117,6 +100,7 @@ def prepare_datasets(
                                       args.test_batch_size, **kwargs)
 
     return {'training': train_data, 'testing': test_data}
+'''
 
 
 
