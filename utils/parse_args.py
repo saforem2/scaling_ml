@@ -122,7 +122,7 @@ def parse_args_torch(*args):
 
     return args
 
-def parse_args_tensorflow(*args):
+def parse_args_tensorflow():
     """Parse command line arguments containing settings for training."""
     description = 'TensorFlow2 MNIST Example'
     parser = argparse.ArgumentParser(description=description)
